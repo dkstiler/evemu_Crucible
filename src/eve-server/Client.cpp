@@ -572,6 +572,10 @@ void Client::ProcessClient() {
                     _log(CLIENT__TIMER, "ProcessClient()::CheckState():  case: Jump");
                     ExecuteJump();
                 } break;
+                case Player::State::DriveJump: {
+                    _log(CLIENT__TIMER, "ProcessClient()::CheckState():  case: DriveJump");
+                    ExecuteDriveJump();
+                } break;
                 case Player::State::Logout: {
                     _log(CLIENT__TIMER, "ProcessClient()::CheckState():  case: Logout");
                     // can we use this to allow WarpOut?
@@ -747,8 +751,12 @@ void Client::MoveToLocation(uint32 locationID, const GPoint& pt) {
         m_ship->Move(m_locationID, flagNone, true);
     }
 
-    /** @todo  verify 'pt' is within system boundaries */
-    m_ship->SetPosition(pt);
+    // verify 'pt' is within system boundaries
+    if (pt.length() < m_SystemData.radius) {
+        m_ship->SetPosition(pt);
+    } else {
+        ;  // oob
+    }
 
     char ci[45];
     if (IsStation(m_locationID)) {
@@ -824,9 +832,7 @@ void Client::MoveToLocation(uint32 locationID, const GPoint& pt) {
     if (!m_login)
         m_ship->SaveShip(); // this saves everything on ship
 
-    uint32 stationID(0);
-    if (IsStation(m_locationID))
-        stationID = m_locationID;
+    uint32 stationID(IsStation(m_locationID) ? m_locationID : 0);
     m_char->SetLocation(stationID, m_SystemData);
 
     UpdateSession();
@@ -1439,6 +1445,26 @@ void Client::StargateJump(uint32 fromGate, uint32 toGate) {
     SetStateTimer(Player::State::Jump, Player::Timer::Jumping);
 }
 
+void Client::CynoJump(uint32 startLocation, uint32 destLocation, GPoint destPoint) {
+    if ((m_clientState != Player::State::Idle) or m_stateTimer.Enabled()) {
+        sLog.Error("Client","%s: CynoJump called when a move is already pending. Ignoring.", m_char->name());
+        // send client msg about state change in progress
+        return;
+    }
+
+    MapDB::AddJump(startLocation);
+    MapDB::AddJump(destLocation);
+    m_char->VisitSystem(destLocation);
+
+    JumpOutEffect(startLocation);
+
+    m_movePoint = destPoint;
+    m_movePoint.MakeRandomPointOnSphereLayer(200,500);
+    m_moveSystemID = destLocation;
+
+    SetStateTimer(Player::State::DriveJump, Player::Timer::Jumping);
+}
+
 void Client::ExecuteJump() {
     if (m_movePoint == NULL_ORIGIN) {   // this is part of infant AP hack
         m_clientState = Player::State::Idle;
@@ -1451,6 +1477,27 @@ void Client::ExecuteJump() {
     pShipSE->Jump();
 
     MoveToLocation(m_moveSystemID, m_movePoint);
+
+    SetBallParkTimer(Player::Timer::Jump);
+
+    m_movePoint = NULL_ORIGIN;
+    m_moveSystemID = 0;
+}
+
+void Client::ExecuteDriveJump() {
+    if (m_movePoint == NULL_ORIGIN) {   // this is part of infant AP hack
+        m_clientState = Player::State::Idle;
+        _log(AUTOPILOT__TRACE, "ExecuteJump() - movePoint = null; state set to Idle");
+        return;
+    }
+
+    //OnScannerInfoRemoved  - no args.  flushes scan data in client
+    SendNotification("OnScannerInfoRemoved", "charid", new PyTuple(0), true);  // this is sequenced
+    pShipSE->Jump(false);
+
+    MoveToLocation(m_moveSystemID, m_movePoint);
+
+    JumpInEffect();
 
     SetBallParkTimer(Player::Timer::Jump);
 
@@ -1582,14 +1629,15 @@ void Client::JumpOutEffect(uint32 locationID)
 std::string Client::GetStateName(int8 state)
 {
     switch (state) {
-        case Player::State::Idle:    return "Idle";
-        case Player::State::Jump:    return "Jump";
-        case Player::State::Dock:    return "Dock";
-        case Player::State::Undock:  return "Undock";
-        case Player::State::Killed:  return "Killed";
-        case Player::State::Logout:  return "Logout";
-        case Player::State::Board:   return "Board";
-        case Player::State::Login:   return "Login";
+        case Player::State::Idle:      return "Idle";
+        case Player::State::Jump:      return "Jump";
+        case Player::State::DriveJump: return "DriveJump";
+        case Player::State::Dock:      return "Dock";
+        case Player::State::Undock:    return "Undock";
+        case Player::State::Killed:    return "Killed";
+        case Player::State::Logout:    return "Logout";
+        case Player::State::Board:     return "Board";
+        case Player::State::Login:     return "Login";
     }
     return "Undefined";
 }
@@ -1923,7 +1971,7 @@ void Client::UpdateCorpSession(CorpData& data)
     if (data.allianceID != 0){
         pSession->SetInt("allianceid", data.allianceID);
     }
-    
+
     pSession->SetInt("warfactionid", data.warFactionID);
     pSession->SetInt("corpAccountKey", data.corpAccountKey);
     pSession->SetLong("corprole", data.corpRole);
@@ -1947,6 +1995,47 @@ void Client::UpdateFleetSession(CharFleetData& fleet)
     pSession->SetInt("wingid", m_wing);
     pSession->SetInt("squadid", m_squad);
     SendSessionChange();
+}
+
+void Client::SendInitialSessionStatus ()
+{
+    SessionInitialState scn;
+    scn.initialstate = new PyDict();
+
+    pSession->EncodeInitialState (scn.initialstate);
+
+    if (is_log_enabled(CLIENT__SESSION)) {
+        _log(CLIENT__SESSION, "Session initialized.  Sending initial session state");
+        scn.initialstate->Dump(CLIENT__SESSION, "   Changes: ");
+    }
+
+    scn.sessionID = pSession->GetSessionID();
+
+    //build the packet:
+    PyPacket* packet = new PyPacket();
+    packet->type_string = "macho.SessionInitialStateNotification";
+    packet->type = SESSIONINITIALSTATENOTIFICATION;
+
+    packet->source.type = PyAddress::Node;
+    packet->source.objectID = m_services.GetNodeID();
+    packet->source.callID = 0;
+
+    packet->dest.type = PyAddress::Client;
+    packet->dest.objectID = 0; //GetClientID();
+    packet->dest.callID = 0;
+
+    packet->userid = GetUserID();
+
+    packet->payload = scn.Encode();
+    packet->named_payload = nullptr;
+
+    if (is_log_enabled(CLIENT__SESSION_DUMP)) {
+        _log(CLIENT__SESSION_DUMP, "Sending Session packet:");
+        PyLogDumpVisitor dumper(CLIENT__SESSION_DUMP, CLIENT__SESSION_DUMP);
+        packet->Dump(CLIENT__SESSION_DUMP, dumper);
+    }
+
+    QueuePacket(packet);
 }
 
 void Client::SendSessionChange()
@@ -1981,7 +2070,7 @@ void Client::SendSessionChange()
         scn.changes->Dump(CLIENT__SESSION, "   Changes: ");
     }
 
-    scn.sessionID = pSession->GetSessionID();
+    scn.sessionID = 0; //pSession->GetSessionID();
     scn.clueless = 0;
     scn.nodesOfInterest.push_back(-1);  /* this means 'all nodes' */
     scn.nodesOfInterest.push_back(m_services.GetNodeID());  /* add current node to list */
@@ -2333,8 +2422,8 @@ bool Client::_VerifyLogin(CryptoChallengePacket& ccp)
     pSession->SetInt("userType", Acct::Type::Mammon);     //aData.type  - incomplete (db fields done)
     pSession->SetInt("userid", aData.id);
     pSession->SetLong("role", aData.role);
-    pSession->SetLong("clientID", 1000000L * aData.clientID + 888444);  // kinda arbitrary
-    pSession->SetLong("sessionID", pSession->GetSessionID());
+    pSession->SetLong("clientID", 0 /*1000000L * aData.clientID + 888444*/);  // kinda arbitrary
+    pSession->SetLong("sessionID", 0 /*pSession->GetSessionID()*/);
 
     sLog.Green("  Client::Login()","Account %u (%s) logging in from %s", aData.id, aData.name.c_str(), EVEClientSession::GetAddress().c_str());
 
@@ -2364,14 +2453,14 @@ bool Client::_VerifyFuncResult(CryptoHandshakeResult& result)
         ack.client_hash = PyStatic.NewNone();
         ack.user_clientid = 0; //GetClientID();  //241241000001103
         ack.live_updates = sLiveUpdateDB.GetUpdates();
-        ack.sessionID = pSession->GetSessionID();   //398773966249980114
+        ack.sessionID = 0; //pSession->GetSessionID();   //398773966249980114
     PyRep* res(ack.Encode());
     if (is_log_enabled(CLIENT__CALL_DUMP))
         res->Dump(CLIENT__CALL_DUMP, "    ");
     mNet->QueueRep(res, false);
 
-    // Send out the session change
-    SendSessionChange();
+    // send out the initial session status
+    SendInitialSessionStatus();
 
     return true;
 }

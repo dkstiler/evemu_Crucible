@@ -1,4 +1,5 @@
 *** 0.8.4 ***
+- Added support for aarch64 with docker-compose
 - [FEAT] Alliances Implemented
 - [FEAT] Sovereignty Implemented
 - Fixed bug in PI database causing segmentation fault
