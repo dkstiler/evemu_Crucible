@@ -811,7 +811,8 @@ void DestinyManager::MoveObject() {
         //Va(t) = 1 - ((1)*e^(-3*t/M) assuming always the initial velocity to be 0 
         //Vd(t) = 3 - 3* e^(-1*t/M)   assuming always the initial velocity to be 0
 
-        m_currentSpeedFraction = (1 - exp(-timeStamp / m_shipAgility));
+        //m_currentSpeedFraction = (1 - exp(-timeStamp / m_shipAgility));
+        m_currentSpeedFraction = (1 - exp(-timeStamp / m_mass));
 
         if (m_accel) {
             //m_activeSpeedFraction = m_userSpeedFraction * m_currentSpeedFraction;
