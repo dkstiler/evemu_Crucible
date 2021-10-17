@@ -733,23 +733,13 @@ void DestinyManager::MoveObject() {
      * to define speed at X time, we will use the following equation.
      *
      *   Vt = Vm * (1 - e(-t * 10^6 / IM))
-     * 
-     * I = (2/5)*M*(R^2)
-     *   
-     *   V(t) = a/k -((a-v(0)*k)/k)*e^(-k*t/I*M)
-     *
      * where
-     * a = a(x)^2 + a(y)^2 + a(z)^2 the Unit Vector
-     * v(0) = ships initial velocity at t=0
      * Vt = ships velocity at t
      * Vm = ships maximum velocity
      *  t = time
      *  I = ships inertia in s/kg
      *  M = ships mass in kg
      *  e = base of natural logarithms
-     *  k = 3 when accelerating and 1 when decelerating
-     * Va(t) = 1 - ((1)*e^(-3*t/M) assuming always the initial velocity to be 0 
-     * Vd(t) = 3 - 3* e^(-1*t/M)   assuming always the initial velocity to be 0
      */
 
     /* **UPDATE**  this now uses time AND (m_currentSpeedFraction > 0.9999f) for min/max speeds.  -allan 6Aug14
@@ -765,7 +755,15 @@ void DestinyManager::MoveObject() {
             Turn();
     }
 
-    timeStamp = (GetTimeMSeconds() - m_moveTime) /1000;
+    double timestamp_timer(0);   // keep all these timers in seconds
+    for (int i = 0; i < 10; i++) {
+        timestamp_timer = timestamp_timer + GetTimeMSeconds();
+    }
+    double median_tstmp_timer(0);
+    
+    median_tstmp_timer = timestamp_timer/10;
+
+    timeStamp = ( median_tstmp_timer - m_moveTime) /1000;
 
     float speed(0.0f);
     std::string move = "";
@@ -789,7 +787,7 @@ void DestinyManager::MoveObject() {
             m_currentSpeedFraction = 1.0f;
             m_activeSpeedFraction = m_userSpeedFraction;
             move = "at constant speed, going";
-            speed = m_maxSpeed * m_activeSpeedFraction;
+            speed = m_maxSpeed;
         } else {
             //ship has reached full stop
             // update position one final time (for last bit of drift) and exit movement functions by calling Halt()
@@ -808,20 +806,17 @@ void DestinyManager::MoveObject() {
             move = "accelerating";
         }
 
-        //Va(t) = 1 - ((1)*e^(-3*t/M) assuming always the initial velocity to be 0 
-        //Vd(t) = 3 - 3* e^(-1*t/M)   assuming always the initial velocity to be 0
-
+        double t_multipl_sp(1000000);
         //m_currentSpeedFraction = (1 - exp(-timeStamp / m_shipAgility));
-        m_currentSpeedFraction = (1 - exp(-timeStamp / m_mass));
+        m_currentSpeedFraction = (1 - exp(((-timeStamp)*t_multipl_sp)/(m_mass*m_shipInertia)));
+        
 
         if (m_accel) {
-            //m_activeSpeedFraction = m_userSpeedFraction * m_currentSpeedFraction;
-            m_activeSpeedFraction = m_userSpeedFraction * (1-exp(-3*timeStamp/m_mass));
+            m_activeSpeedFraction =  m_currentSpeedFraction;
         } else if (m_decel) {
-            //m_activeSpeedFraction = m_prevSpeedFraction * m_currentSpeedFraction;
-            m_activeSpeedFraction = m_prevSpeedFraction * (3-3*exp(-timeStamp/m_mass));
+            m_activeSpeedFraction = m_prevSpeedFraction * m_currentSpeedFraction;
         } else if (m_userSpeedFraction != m_activeSpeedFraction) {
-            m_activeSpeedFraction = m_currentSpeedFraction;
+            m_activeSpeedFraction = m_userSpeedFraction * m_currentSpeedFraction;
         } else if (m_tractored or m_tractorPause or (m_activeSpeedFraction == 1)) {
             ;   // do nothing here.  this is to remove error reporting from next line.
         } else {
